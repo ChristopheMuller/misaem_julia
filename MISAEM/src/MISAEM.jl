@@ -656,8 +656,8 @@ function predict_proba(model::SAEMLogisticRegression, X_test::AbstractMatrix;
                 chol_sigma_cond = cholesky(Hermitian(sigma_cond)).L
                 
                 x2 = xi_pattern[:, obs_col]
-                solve_term = (sigma22 \ (x2 .- mu2')')
-                mu_cond = mu1' .+ solve_term' * sigma12'
+                solve_term = (x2 .- mu2') * (sigma22 \ sigma12')
+                mu_cond = mu1' .+ solve_term
             else
                 sigma_cond = sigma_saem[miss_col, miss_col]
                 chol_sigma_cond = cholesky(Hermitian(sigma_cond)).L
@@ -671,7 +671,7 @@ function predict_proba(model::SAEMLogisticRegression, X_test::AbstractMatrix;
                 for m in 1:nmcmc
                     # Generate missing values
                     rand_sample = randn(length(miss_col))
-                    x1_sample = mu_cond[i, :]' + chol_sigma_cond * rand_sample
+                    x1_sample = mu_cond[i, :] + chol_sigma_cond * rand_sample
                     
                     # Complete observation
                     xi_complete = copy(xi_pattern[i, :])
