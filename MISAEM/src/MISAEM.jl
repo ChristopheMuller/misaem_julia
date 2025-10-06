@@ -8,11 +8,6 @@ using ProgressMeter
 
 export SAEMLogisticRegression, fit!, predict, predict_proba, likelihood_saem
 
-# Custom warning type for data removal
-struct DataRemovalWarning <: Exception
-    msg::String
-end
-
 """
     SAEMLogisticRegression
 
@@ -118,7 +113,7 @@ function check_X_y(X::AbstractMatrix, y::Union{AbstractVector, Nothing}=nothing;
     
     if any(.!complete_rows)
         sum_removed = sum(.!complete_rows)
-        @warn "$(sum_removed) rows with all NaN values in X have been removed." DataRemovalWarning
+        @warn "$(sum_removed) rows with all NaN values in X have been removed."
         
         if y_copy !== nothing
             y_copy = y_copy[complete_rows]
