@@ -315,16 +315,27 @@ function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstract
             d2l = -x * x' * (exp_b / (1 + exp_b)^2)
             I_obs -= d2l
         end
-        
+
         if njna > 0
             xi = X_sim[i, :]
-            Oi = inv(S_inv[jna, jna])
+            
+            # Extract submatrix and ensure symmetry
+            S_inv_sub = S_inv[jna, jna]
+            S_inv_sub = (S_inv_sub + S_inv_sub') / 2  # Force symmetry
+            
+            local Oi
+            try
+                Oi = inv(S_inv_sub)
+            catch
+                Oi = inv(S_inv_sub + 1e-6 * LinearAlgebra.I(njna))
+            end
+            
             mi = mu_subset[jna]
             lobs = beta_subset[1]
             
             if njna < p_subset
                 jobs = setdiff(1:p_subset, jna)
-                mi = mi - (xi[jobs] - mu_subset[jobs])' * S_inv[jobs, jna] * Oi
+                mi = mi - (Oi * S_inv[jna, jobs] * (xi[jobs] - mu_subset[jobs]))
                 lobs += dot(xi[jobs], beta_subset[jobs .+ 1])
             end
             
@@ -333,8 +344,26 @@ function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstract
             betana = beta_subset[jna .+ 1]
             
             for m in 1:nmcmc
-                # Generate candidate
-                xina_c = mi + randn(njna)' * cholesky(Oi).L'
+                # Generate candidate - fix the random generation
+                if njna == 1
+                    # Scalar case
+                    xina_c = mi .+ sqrt(Oi[1,1]) * randn()
+                else
+                    # Multivariate case - ensure Oi is positive definite
+                    Oi_sym = (Oi + Oi') / 2
+                    try
+                        L = cholesky(Oi_sym).L
+                        xina_c = mi + L * randn(njna)
+                    catch
+                        # Fallback: use eigendecomposition
+                        eigen_decomp = eigen(Oi_sym)
+                        # Keep only positive eigenvalues
+                        pos_idx = eigen_decomp.values .> 1e-10
+                        L = eigen_decomp.vectors[:, pos_idx] * 
+                            Diagonal(sqrt.(eigen_decomp.values[pos_idx]))
+                        xina_c = mi + L * randn(sum(pos_idx))
+                    end
+                end
                 
                 # Metropolis-Hastings step
                 if y[i] == 1
