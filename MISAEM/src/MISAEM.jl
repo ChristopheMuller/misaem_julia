@@ -5,6 +5,7 @@ using Random
 using Statistics
 using Distributions
 using ProgressMeter
+using GLM
 
 export SAEMLogisticRegression, fit!, predict, predict_proba, likelihood_saem
 
@@ -108,7 +109,6 @@ function check_X_y(X::AbstractMatrix, y::Union{AbstractVector, Nothing}=nothing;
         throw(ArgumentError("X contains only NaN values."))
     end
     
-    # Remove rows with all NaN values
     complete_rows = .!all(isnan.(X_copy), dims=2)[:]
     
     if any(.!complete_rows)
@@ -137,51 +137,105 @@ function check_X_y(X::AbstractMatrix, y::Union{AbstractVector, Nothing}=nothing;
 end
 
 """
-    logistic_regression_fit(X, y)
+    logistic_regression_fit(X, y; return_vcov=false, max_iter=1000, tol=1e-8)
 
-Fit a simple logistic regression using iterative reweighted least squares.
+Fit logistic regression. Preferred path: use GLM.jl (MLE + standard errors).
+If GLM fails, fall back to an IRLS implementation (the previous hand-rolled solver).
+
+Arguments
+- X : (n x p) numeric matrix (no intercept column expected)
+- y : length-n vector with 0/1 values
+- return_vcov : if true, also return the estimated covariance matrix (vcov) from GLM (or `nothing` for fallback)
+- max_iter, tol : parameters used by fallback IRLS only
+
+Returns
+- beta (p+1)-vector (intercept first)
+- optionally (beta, vcov_matrix) when return_vcov=true
 """
-function logistic_regression_fit(X::AbstractMatrix, y::AbstractVector; max_iter::Int=1000, tol::Float64=1e-8)
+function logistic_regression_fit(X::AbstractMatrix, y::AbstractVector; return_vcov::Bool=false,
+                                 max_iter::Int=1000, tol::Float64=1e-8)
+
+    # Basic checks & conversions
     n, p = size(X)
-    X_design = hcat(ones(n), X)
-    beta = zeros(p + 1)
-    
-    for iter in 1:max_iter
-        linear_pred = X_design * beta
-        # Prevent overflow
-        linear_pred = clamp.(linear_pred, -700, 700)
-        prob = 1 ./ (1 .+ exp.(-linear_pred))
-        
-        # Avoid numerical issues
-        prob = clamp.(prob, 1e-15, 1 - 1e-15)
-        
-        w = prob .* (1 .- prob)
-        W = Diagonal(w)
-        
-        # Check for numerical issues
-        if any(w .< 1e-15)
-            @warn "Numerical instability detected in logistic regression"
-            break
-        end
-        
-        z = linear_pred .+ (y .- prob) ./ w
-        
-        try
-            beta_new = (X_design' * W * X_design) \ (X_design' * W * z)
-            
-            if norm(beta_new - beta) < tol
-                beta = beta_new
-                break
-            end
-            
-            beta = beta_new
-        catch e
-            @warn "Numerical error in logistic regression: $e"
-            break
+    if length(y) != n
+        throw(ArgumentError("length(y) must equal size(X,1)"))
+    end
+    # force numeric types
+    Xmat = Array{Float64}(X)
+    yvec = Array{Float64}(y)  # allow Bool/Int/Float inputs; GLM accepts numeric 0/1
+
+    # Ensure y contains only 0/1
+    uniqy = unique(yvec)
+    for v in uniqy
+        if !(v == 0.0 || v == 1.0)
+            throw(ArgumentError("y must contain only 0/1 values"))
         end
     end
-    
-    return beta
+
+    # Try GLM path first (preferred)
+    try
+        # GLM accepts a design matrix with intercept column included.
+        X_design = hcat(ones(n), Xmat)
+        glm_model = GLM.glm(X_design, yvec, Binomial(), LogitLink())
+        beta = coef(glm_model)                     # (p+1) vector
+        if return_vcov
+            return beta, vcov(glm_model)
+        else
+            return beta
+        end
+
+    catch err
+        # If GLM fails for any reason, warn and fall back to IRLS (previous implementation).
+        @warn "GLM.jl logistic fit failed; falling back to IRLS. Error: $err"
+
+        # --- fallback IRLS (your original code) ---
+        X_design = hcat(ones(n), Xmat)
+        beta = zeros(p + 1)
+
+        for iter in 1:max_iter
+            linear_pred = X_design * beta
+            # Prevent overflow
+            linear_pred = clamp.(linear_pred, -700, 700)
+            prob = 1.0 ./ (1.0 .+ exp.(-linear_pred))
+
+            # Avoid numerical issues
+            prob = clamp.(prob, 1e-15, 1 - 1e-15)
+
+            w = prob .* (1 .- prob)
+
+            # check for numerical issues
+            if any(w .< 1e-15)
+                @warn "Numerical instability detected in IRLS fallback; stopping early."
+                break
+            end
+
+            z = linear_pred .+ (yvec .- prob) ./ w
+
+            # Weighted least squares update
+            # Use \ which is numerically stable; form X' W X and X' W z implicitly
+            WX = X_design .* sqrt.(w)   # each column scaled by sqrt(w)
+            wz = sqrt.(w) .* z
+
+            try
+                beta_new = WX \ wz   # solves (WX'WX) beta = WX'wz which equals the weighted LS
+                if norm(beta_new - beta) < tol
+                    beta = beta_new
+                    break
+                end
+                beta = beta_new
+            catch e
+                @warn "Numerical error during IRLS fallback: $e"
+                break
+            end
+        end
+
+        if return_vcov
+            # We don't compute a reliable vcov for the fallback here.
+            return beta, nothing
+        else
+            return beta
+        end
+    end
 end
 
 """
@@ -567,23 +621,19 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         
     else
         # No missing data - standard logistic regression
-        beta_lr = logistic_regression_fit(X_clean, y_clean)
+        if model.var_cal
+            beta_lr, vcov_matrix = logistic_regression_fit(X_clean[:, subsets], y_clean; return_vcov=true)
+            var_coefs = vcov_matrix === nothing ? fill(NaN, length(beta_lr)) : diag(vcov_matrix)
+            model.std_err = sqrt.(var_coefs)
+        else
+            beta_lr = logistic_regression_fit(X_clean[:, subsets], y_clean)
+        end
         beta = beta_lr
         mu = vec(mean(X_clean, dims=1))
         sigma = cov(X_clean) * (n-1) / n
         
         model.converged = true
         model.n_iterations = 0
-        
-        # Compute variance
-        if model.var_cal
-            X_design = hcat(ones(n), X_clean)
-            linear_pred = X_design * beta
-            prob = 1 ./ (1 .+ exp.(-linear_pred))
-            W = Diagonal(prob .* (1 .- prob))
-            var_obs = inv(X_design' * W * X_design)
-            model.std_err = sqrt.(diag(var_obs))
-        end
         
         # Compute likelihood
         if model.ll_obs_cal
