@@ -611,7 +611,10 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         if model.var_cal
             var_obs = louis_lr_saem(beta, mu, sigma, y_clean, X_clean, 
                                   collect(subsets), rindic, 100)
-            model.std_err = sqrt.(diag(var_obs))
+            diag_var = diag(var_obs)
+            diag_var[diag_var .< 0] .= NaN 
+            model.std_err = sqrt.(diag_var)
+
         end
         
         # Compute likelihood if requested
@@ -624,7 +627,9 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         if model.var_cal
             beta_lr, vcov_matrix = logistic_regression_fit(X_clean[:, subsets], y_clean; return_vcov=true)
             var_coefs = vcov_matrix === nothing ? fill(NaN, length(beta_lr)) : diag(vcov_matrix)
+            var_coefs[var_coefs .< 0] .= NaN
             model.std_err = sqrt.(var_coefs)
+
         else
             beta_lr = logistic_regression_fit(X_clean[:, subsets], y_clean)
         end
@@ -645,7 +650,7 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
     # Store final parameters
     final_params = beta[[1; subsets .+ 1]]
     model.intercept = final_params[1]
-    model.coef = final_params
+    model.coef = final_params[2:end]
     model.mu = mu
     model.sigma = sigma
     
@@ -669,7 +674,8 @@ function predict_proba(model::SAEMLogisticRegression, X_test::AbstractMatrix;
     n, p = size(X_test_clean)
     
     subsets = model.subsets === nothing ? (1:p) : model.subsets
-    beta_saem = model.coef
+    beta_saem = vcat(model.intercept, model.coef)
+
     mu_saem = model.mu
     sigma_saem = model.sigma
     
