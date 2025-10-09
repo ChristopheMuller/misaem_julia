@@ -319,13 +319,12 @@ function stochastic_step!(X_sim::AbstractMatrix, unique_patterns::AbstractMatrix
 end
 
 """
-    louis_lr_saem(beta, mu, sigma, y, X_obs, pos_var, rindic, nmcmc)
+    louis_lr_saem(beta, mu, sigma, y, X_obs, pos_var, nmcmc)
 
 Compute the Louis method for variance estimation in SAEM.
 """
 function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::AbstractMatrix,
-                      y::AbstractVector, X_obs::AbstractMatrix, pos_var::AbstractVector,
-                      rindic::AbstractMatrix, nmcmc::Int)
+                      y::AbstractVector, X_obs::AbstractMatrix, pos_var::AbstractVector, nmcmc::Int)
     
     n, p = size(X_obs)
     p_subset = length(pos_var)
@@ -335,7 +334,6 @@ function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstract
     mu_subset = mu[pos_var]
     sigma_subset = sigma[pos_var, pos_var]
     X_subset = X_obs[:, pos_var]
-    rindic_subset = rindic[:, pos_var]
     
     # Initialize matrices
     G = zeros(p_subset + 1, p_subset + 1)
@@ -610,7 +608,7 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         # Compute variance if requested
         if model.var_cal
             var_obs = louis_lr_saem(beta, mu, sigma, y_clean, X_clean, 
-                                  collect(subsets), rindic, 100)
+                                  collect(subsets), 100)
             diag_var = diag(var_obs)
             diag_var[diag_var .< 0] .= NaN 
             model.std_err = sqrt.(diag_var)
