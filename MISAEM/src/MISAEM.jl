@@ -243,7 +243,7 @@ end
 
 Perform the stochastic step of the SAEM algorithm.
 """
-function stochastic_step!(X_sim::AbstractMatrix, unique_patterns::AbstractMatrix, 
+function stochastic_step!(rng::AbstractRNG, X_sim::AbstractMatrix, unique_patterns::AbstractMatrix, 
                          pattern_indices::AbstractVector, sigma_inv::AbstractMatrix,
                          mu::AbstractVector, beta::AbstractVector, y::AbstractVector, nmcmc::Int)
     
@@ -291,7 +291,7 @@ function stochastic_step!(X_sim::AbstractMatrix, unique_patterns::AbstractMatrix
         
         for m in 1:nmcmc
             # Generate candidates
-            rand_normal = randn(n_pattern, n_missing)
+            rand_normal = randn(rng, n_pattern, n_missing)
             xina_c = mu_cond_M .+ rand_normal * chol_sigma_cond_M'
             
             # Compute acceptance probabilities
@@ -308,7 +308,7 @@ function stochastic_step!(X_sim::AbstractMatrix, unique_patterns::AbstractMatrix
             alpha = ifelse.(is_y1, ratio_y1, ratio_y0)
             
             # Accept or reject
-            accepted = rand(n_pattern) .< alpha
+            accepted = rand(rng, n_pattern) .< alpha
             xina[accepted, :] = xina_c[accepted, :]
         end
         
@@ -323,7 +323,7 @@ end
 
 Compute the Louis method for variance estimation in SAEM.
 """
-function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::AbstractMatrix,
+function louis_lr_saem(rng::AbstractRNG, beta::AbstractVector, mu::AbstractVector, sigma::AbstractMatrix,
                       y::AbstractVector, X_obs::AbstractMatrix, pos_var::AbstractVector, nmcmc::Int)
     
     n, p = size(X_obs)
@@ -400,7 +400,7 @@ function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstract
                     Oi_sym = (Oi + Oi') / 2
                     try
                         L = cholesky(Oi_sym).L
-                        xina_c = mi + L * randn(njna)
+                        xina_c = mi + L * randn(rng, njna)
                     catch
                         # Fallback: use eigendecomposition
                         eigen_decomp = eigen(Oi_sym)
@@ -408,7 +408,7 @@ function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstract
                         pos_idx = eigen_decomp.values .> 1e-10
                         L = eigen_decomp.vectors[:, pos_idx] * 
                             Diagonal(sqrt.(eigen_decomp.values[pos_idx]))
-                        xina_c = mi + L * randn(sum(pos_idx))
+                        xina_c = mi + L * randn(rng, sum(pos_idx))
                     end
                 end
                 
@@ -420,8 +420,8 @@ function louis_lr_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstract
                     alpha = (1 + exp(dot(xina, betana)) * cobs) / 
                            (1 + exp(dot(xina_c, betana)) * cobs)
                 end
-                
-                if rand() < alpha
+
+                if rand(rng) < alpha
                     xina = xina_c
                 end
                 
@@ -450,7 +450,7 @@ end
 
 Compute the observed data log-likelihood using SAEM.
 """
-function likelihood_saem(beta::AbstractVector, mu::AbstractVector, sigma::AbstractMatrix,
+function likelihood_saem(rng::AbstractRNG, beta::AbstractVector, mu::AbstractVector, sigma::AbstractMatrix,
                         y::AbstractVector, X_obs::AbstractMatrix, rindic::AbstractMatrix, nmcmc::Int)
     
     n, p = size(X_obs)
@@ -491,7 +491,7 @@ function likelihood_saem(beta::AbstractVector, mu::AbstractVector, sigma::Abstra
             lh_mis = 0.0
             for m in 1:nmcmc
                 # Generate missing values
-                x1_sample = mu_cond + randn(length(miss_col))' * cholesky(sigma_cond).L'
+                x1_sample = mu_cond + randn(rng, length(miss_col))' * cholesky(sigma_cond).L'
                 
                 # Complete the observation
                 xi_complete = copy(xi)
@@ -516,12 +516,11 @@ end
 Fit the SAEM logistic regression model.
 """
 function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVector; 
-              save_trace::Bool=false, progress_bar::Bool=true)
+              progress_bar::Bool=true)
     
-    # Set random seed if specified
-    if model.random_state !== nothing
-        Random.seed!(model.random_state)
-    end
+
+    rng = model.random_state === nothing ? Random.GLOBAL_RNG : Random.MersenneTwister(model.random_state)
+
     
     # Validate inputs
     X_clean, y_clean = check_X_y(X, y)
@@ -574,7 +573,7 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
             beta_old = copy(beta)
             
             # Stochastic step
-            X_sim = stochastic_step!(X_sim, unique_patterns, pattern_indices, 
+            X_sim = stochastic_step!(rng, X_sim, unique_patterns, pattern_indices, 
                                    sigma_inv, mu, beta, y_clean, model.nmcmc)
             
             # Maximization step
@@ -607,7 +606,7 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         
         # Compute variance if requested
         if model.var_cal
-            var_obs = louis_lr_saem(beta, mu, sigma, y_clean, X_clean, 
+            var_obs = louis_lr_saem(rng, beta, mu, sigma, y_clean, X_clean,
                                   collect(subsets), 100)
             diag_var = diag(var_obs)
             diag_var[diag_var .< 0] .= NaN 
@@ -617,7 +616,7 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         
         # Compute likelihood if requested
         if model.ll_obs_cal
-            model.ll_obs = likelihood_saem(beta, mu, sigma, y_clean, X_clean, rindic, 100)
+            model.ll_obs = likelihood_saem(rng, beta, mu, sigma, y_clean, X_clean, rindic, 100)
         end
         
     else
@@ -640,8 +639,7 @@ function fit!(model::SAEMLogisticRegression, X::AbstractMatrix, y::AbstractVecto
         
         # Compute likelihood
         if model.ll_obs_cal
-            model.ll_obs = likelihood_saem(beta, mu, sigma, y_clean, X_clean, 
-                                         zeros(Bool, size(X_clean)), 100)
+            model.ll_obs = likelihood_saem(rng, beta, mu, sigma, y_clean, X_clean, zeros(Bool, size(X_clean)), 100)
         end
     end
     
